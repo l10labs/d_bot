@@ -2946,6 +2946,7 @@ dependencies = [
  "async-trait",
  "backoff",
  "base64 0.22.1",
+ "bitflags 2.13.2",
  "bon",
  "chrono",
  "dashmap",
