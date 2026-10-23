@@ -1,0 +1,77 @@
+CREATE TABLE IF NOT EXISTS markets (
+    id INTEGER PRIMARY KEY,
+    condition_id TEXT NOT NULL UNIQUE,
+    asset TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    starts_at INTEGER NOT NULL,
+    ends_at INTEGER NOT NULL,
+    discovered_at INTEGER NOT NULL,
+    CHECK (ends_at > starts_at)
+);
+
+CREATE TABLE IF NOT EXISTS market_tokens (
+    id INTEGER PRIMARY KEY,
+    token_id TEXT NOT NULL UNIQUE,
+    market_id INTEGER NOT NULL REFERENCES markets(id),
+    outcome TEXT NOT NULL CHECK (outcome IN ('up', 'down')),
+    UNIQUE (market_id, outcome)
+);
+
+CREATE TABLE IF NOT EXISTS chainlink_prices (
+    id INTEGER PRIMARY KEY,
+    asset TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    price TEXT NOT NULL,
+    source_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS chainlink_prices_asset_source_time_idx
+    ON chainlink_prices (asset, source_at, id);
+CREATE INDEX IF NOT EXISTS chainlink_prices_received_time_idx
+    ON chainlink_prices (received_at, id);
+
+CREATE TABLE IF NOT EXISTS binance_prices (
+    id INTEGER PRIMARY KEY,
+    asset TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    price TEXT NOT NULL,
+    source_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS binance_prices_asset_source_time_idx
+    ON binance_prices (asset, source_at, id);
+CREATE INDEX IF NOT EXISTS binance_prices_received_time_idx
+    ON binance_prices (received_at, id);
+
+CREATE TABLE IF NOT EXISTS market_bid_asks (
+    id INTEGER PRIMARY KEY,
+    market_token_id INTEGER NOT NULL REFERENCES market_tokens(id),
+    best_bid TEXT NOT NULL,
+    best_ask TEXT NOT NULL,
+    spread TEXT NOT NULL,
+    source_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS market_bid_asks_token_time_idx
+    ON market_bid_asks (market_token_id, source_at, id);
+CREATE INDEX IF NOT EXISTS market_bid_asks_received_time_idx
+    ON market_bid_asks (received_at, id);
+
+CREATE TABLE IF NOT EXISTS market_trades (
+    id INTEGER PRIMARY KEY,
+    market_token_id INTEGER NOT NULL REFERENCES market_tokens(id),
+    price TEXT NOT NULL,
+    size TEXT,
+    side TEXT CHECK (side IN ('buy', 'sell')),
+    fee_rate_bps TEXT,
+    source_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS market_trades_token_time_idx
+    ON market_trades (market_token_id, source_at, id);
+CREATE INDEX IF NOT EXISTS market_trades_received_time_idx
+    ON market_trades (received_at, id);

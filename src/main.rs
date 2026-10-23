@@ -7,8 +7,11 @@ use polymarket_client_sdk_v2::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod database;
+
 #[tokio::main]
-async fn main() -> polymarket_client_sdk_v2::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _database = database::setup("markets_5m.db").await?;
     let gamma = GammaClient::default();
     let client = ClobClient::default();
 
