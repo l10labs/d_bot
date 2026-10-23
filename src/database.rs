@@ -50,13 +50,17 @@ pub async fn writer(
 ) -> Result<()> {
     let mut token_ids = HashMap::new();
     let mut batch = Vec::with_capacity(256);
+    let mut labels = HashMap::new();
 
     while receiver.recv_many(&mut batch, 256).await > 0 {
         let transaction = connection.transaction().await?;
-        for message in batch.drain(..) {
+        for message in &batch {
             write_event(&transaction, &mut token_ids, message).await?;
         }
         transaction.commit().await?;
+        for message in batch.drain(..) {
+            crate::logging::event(&message, &mut labels);
+        }
     }
 
     Ok(())
@@ -65,17 +69,17 @@ pub async fn writer(
 async fn write_event(
     connection: &Connection,
     token_ids: &mut HashMap<U256, i64>,
-    message: Message,
+    message: &Message,
 ) -> Result<()> {
     let received_at = message.received_at;
-    match message.event {
+    match &message.event {
         Event::Market(market) => {
             let mut rows = connection.query(
                 "INSERT INTO markets (condition_id, asset, slug, starts_at, ends_at, discovered_at)
                  VALUES (?, ?, ?, ?, ?, ?)
                  ON CONFLICT(condition_id) DO UPDATE SET asset = excluded.asset, slug = excluded.slug,
                  starts_at = excluded.starts_at, ends_at = excluded.ends_at RETURNING id",
-                params![market.condition_id.to_string(), market.asset, market.slug,
+                params![market.condition_id.to_string(), market.asset.as_str(), market.slug.as_str(),
                     i64::try_from(market.start_time)? * 1000,
                     i64::try_from(market.end_time)? * 1000, received_at],
             ).await?;
@@ -190,13 +194,11 @@ mod tests {
             Event::Binance(binance),
             Event::Chainlink(chainlink),
         ] {
-            sender
-                .send(Message {
-                    received_at: 300005,
-                    event,
-                })
-                .await
-                .unwrap();
+            let message = Message {
+                received_at: 300005,
+                event,
+            };
+            sender.send(message).await.unwrap();
         }
         drop(sender);
         writer(connection.clone(), receiver).await.unwrap();

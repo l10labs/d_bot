@@ -10,11 +10,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 mod database;
+mod logging;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _logging = logging::setup();
     let connection = database::setup("markets_5m.db").await?;
-    let (sender, receiver) = mpsc::channel(4096);
+    let (sender, receiver) = mpsc::channel(25_600);
     let mut writer = tokio::spawn(database::writer(connection, receiver));
 
     let gamma = GammaClient::default();
@@ -139,7 +141,6 @@ async fn get_market_context(
             event: Event::Market(context.clone()),
         })
         .await?;
-    println!("{context:#?}");
     Ok(context)
 }
 
@@ -154,7 +155,6 @@ async fn stream_best_bid_ask(
     while let Some(quote) = quotes.next().await {
         let quote = quote?;
         let received_at = received_at_ms();
-        println!("{quote:#?}");
         sender
             .send(database::Message {
                 received_at,
@@ -178,7 +178,6 @@ async fn stream_last_trade_price(
     while let Some(trade) = trades.next().await {
         let trade = trade?;
         let received_at = received_at_ms();
-        println!("{trade:#?}");
         sender
             .send(database::Message {
                 received_at,
@@ -198,7 +197,6 @@ async fn stream_binance_prices(sender: &mpsc::Sender<database::Message>) -> Resu
     while let Some(price) = prices.next().await {
         let price: CryptoPrice = price?;
         let received_at = received_at_ms();
-        println!("{price:#?}");
         sender
             .send(database::Message {
                 received_at,
@@ -218,7 +216,6 @@ async fn stream_chainlink_prices(sender: &mpsc::Sender<database::Message>) -> Re
     while let Some(price) = prices.next().await {
         let price: ChainlinkPrice = price?;
         let received_at = received_at_ms();
-        println!("{price:#?}");
         sender
             .send(database::Message {
                 received_at,

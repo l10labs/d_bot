@@ -8,6 +8,9 @@ polymarket_client_sdk_v2 = { version = "0.8.0", features = ["rtds", "gamma", "cl
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
 turso = "0.8.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.5"
 
 [dev-dependencies]
 serde_json = "1.0.154"
