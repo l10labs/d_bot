@@ -3,7 +3,7 @@ use polymarket_client_sdk_v2::{
     clob::ws::Client as ClobClient,
     gamma::{Client as GammaClient, types::request::MarketBySlugRequest},
     rtds::{ChainlinkPrice, Client, CryptoPrice},
-    types::U256,
+    types::{B256, U256},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,17 +23,28 @@ async fn main() -> polymarket_client_sdk_v2::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct MarketContext {
+    pub asset: String,
+    pub slug: String,
+    pub condition_id: B256,
+    pub up_token_id: U256,
+    pub down_token_id: U256,
+    pub start_time: u64,
+    pub end_time: u64,
+}
+
 async fn stream_15m_rolling_5m_market_window(
     gamma: &GammaClient,
     client: &ClobClient,
     asset: &str,
 ) -> polymarket_client_sdk_v2::Result<()> {
+    let start = current_market_start();
+    let mut curr = get_market_context(gamma, asset, start).await;
+    let mut next = get_market_context(gamma, asset, start + 300).await;
+
     loop {
-        let start = current_market_start();
-        let curr = get_token_ids(gamma, asset, start).await;
-        let next1 = get_token_ids(gamma, asset, start + 300).await;
-        let next2 = get_token_ids(gamma, asset, start + 600).await;
-        let end = UNIX_EPOCH + Duration::from_secs(start + 300);
+        let end = UNIX_EPOCH + Duration::from_secs(curr.end_time);
         let remaining = end.duration_since(SystemTime::now()).unwrap_or_default();
 
         let result = tokio::select! {
@@ -42,20 +53,18 @@ async fn stream_15m_rolling_5m_market_window(
             result = async {
                 tokio::try_join!(
                     stream_best_bid_ask(client, &curr),
-                    stream_best_bid_ask(client, &next1),
-                    stream_best_bid_ask(client, &next2),
-                    stream_last_trade_price(client, &curr),
-                    stream_last_trade_price(client, &next1),
-                    stream_last_trade_price(client, &next2)
+                    stream_last_trade_price(client, &curr)
                 ).map(|_| ())
             } => result,
         };
 
-        for token_ids in [&curr, &next1, &next2] {
-            client.unsubscribe_orderbook(token_ids)?;
-            client.unsubscribe_orderbook(token_ids)?;
-        }
+        let token_ids = [curr.up_token_id, curr.down_token_id];
+        client.unsubscribe_orderbook(&token_ids)?;
+        client.unsubscribe_orderbook(&token_ids)?;
         result?;
+
+        curr = next;
+        next = get_market_context(gamma, asset, curr.end_time).await;
     }
 }
 
@@ -68,28 +77,45 @@ fn current_market_start() -> u64 {
         * 300
 }
 
-async fn get_token_ids(gamma: &GammaClient, asset: &str, start: u64) -> Vec<U256> {
+async fn get_market_context(gamma: &GammaClient, asset: &str, start: u64) -> MarketContext {
     let asset = asset.trim().to_ascii_lowercase();
     let slug = format!("{asset}-updown-5m-{start}");
     let market = gamma
-        .market_by_slug(&MarketBySlugRequest::builder().slug(slug).build())
+        .market_by_slug(&MarketBySlugRequest::builder().slug(slug.clone()).build())
         .await
         .unwrap();
-    println!("{market:#?}");
-
     let outcomes = market.outcomes.unwrap();
     let token_ids = market.clob_token_ids.unwrap();
     assert_eq!(outcomes.len(), 2);
     assert_eq!(token_ids.len(), 2);
 
-    token_ids
+    let up = outcomes
+        .iter()
+        .position(|outcome| outcome.eq_ignore_ascii_case("up"))
+        .unwrap();
+    let down = outcomes
+        .iter()
+        .position(|outcome| outcome.eq_ignore_ascii_case("down"))
+        .unwrap();
+
+    let context = MarketContext {
+        asset,
+        slug,
+        condition_id: market.condition_id.unwrap(),
+        up_token_id: token_ids[up],
+        down_token_id: token_ids[down],
+        start_time: start,
+        end_time: start + 300,
+    };
+    println!("{context:#?}");
+    context
 }
 
 async fn stream_best_bid_ask(
     client: &ClobClient,
-    token_ids: &[U256],
+    market: &MarketContext,
 ) -> polymarket_client_sdk_v2::Result<()> {
-    let quotes = client.subscribe_best_bid_ask(token_ids.to_vec())?;
+    let quotes = client.subscribe_best_bid_ask(vec![market.up_token_id, market.down_token_id])?;
     tokio::pin!(quotes);
 
     while let Some(quote) = quotes.next().await {
@@ -102,9 +128,10 @@ async fn stream_best_bid_ask(
 
 async fn stream_last_trade_price(
     client: &ClobClient,
-    token_ids: &[U256],
+    market: &MarketContext,
 ) -> polymarket_client_sdk_v2::Result<()> {
-    let trades = client.subscribe_last_trade_price(token_ids.to_vec())?;
+    let trades =
+        client.subscribe_last_trade_price(vec![market.up_token_id, market.down_token_id])?;
     tokio::pin!(trades);
 
     while let Some(trade) = trades.next().await {
