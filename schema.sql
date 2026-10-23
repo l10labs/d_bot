@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS market_tokens (
     UNIQUE (market_id, outcome)
 );
 
-CREATE TABLE IF NOT EXISTS chainlink_prices (
+CREATE TABLE IF NOT EXISTS prices_chainlink (
     id INTEGER PRIMARY KEY,
     asset TEXT NOT NULL,
     symbol TEXT NOT NULL,
@@ -26,12 +26,12 @@ CREATE TABLE IF NOT EXISTS chainlink_prices (
     received_at INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS chainlink_prices_asset_source_time_idx
-    ON chainlink_prices (asset, source_at, id);
-CREATE INDEX IF NOT EXISTS chainlink_prices_received_time_idx
-    ON chainlink_prices (received_at, id);
+CREATE INDEX IF NOT EXISTS prices_chainlink_asset_source_time_idx
+    ON prices_chainlink (asset, source_at, id);
+CREATE INDEX IF NOT EXISTS prices_chainlink_received_time_idx
+    ON prices_chainlink (received_at, id);
 
-CREATE TABLE IF NOT EXISTS binance_prices (
+CREATE TABLE IF NOT EXISTS prices_binance (
     id INTEGER PRIMARY KEY,
     asset TEXT NOT NULL,
     symbol TEXT NOT NULL,
@@ -40,10 +40,10 @@ CREATE TABLE IF NOT EXISTS binance_prices (
     received_at INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS binance_prices_asset_source_time_idx
-    ON binance_prices (asset, source_at, id);
-CREATE INDEX IF NOT EXISTS binance_prices_received_time_idx
-    ON binance_prices (received_at, id);
+CREATE INDEX IF NOT EXISTS prices_binance_asset_source_time_idx
+    ON prices_binance (asset, source_at, id);
+CREATE INDEX IF NOT EXISTS prices_binance_received_time_idx
+    ON prices_binance (received_at, id);
 
 CREATE TABLE IF NOT EXISTS market_bid_asks (
     id INTEGER PRIMARY KEY,
