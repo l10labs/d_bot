@@ -29,7 +29,11 @@ async fn main() -> Result<()> {
                 stream_chainlink_prices(&sender),
                 stream_15m_rolling_5m_market_window(&gamma, &client, "btc", &sender),
                 stream_15m_rolling_5m_market_window(&gamma, &client, "eth", &sender),
-                stream_15m_rolling_5m_market_window(&gamma, &client, "sol", &sender)
+                stream_15m_rolling_5m_market_window(&gamma, &client, "sol", &sender),
+                stream_15m_rolling_5m_market_window(&gamma, &client, "xrp", &sender),
+                stream_15m_rolling_5m_market_window(&gamma, &client, "bnb", &sender),
+                stream_15m_rolling_5m_market_window(&gamma, &client, "doge", &sender),
+                stream_15m_rolling_5m_market_window(&gamma, &client, "hype", &sender),
             ).map(|_| ())
         } => result,
         result = tokio::signal::ctrl_c() => result.map_err(Into::into),
