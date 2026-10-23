@@ -15,7 +15,7 @@ mod logging;
 #[tokio::main]
 async fn main() -> Result<()> {
     let _logging = logging::setup();
-    let connection = database::setup("markets_5m.db").await?;
+    let connection = database::setup("markets.db").await?;
     let (sender, receiver) = mpsc::channel(25_600);
     let mut writer = tokio::spawn(database::writer(connection, receiver));
 
@@ -27,13 +27,20 @@ async fn main() -> Result<()> {
             tokio::try_join!(
                 stream_binance_prices(&sender),
                 stream_chainlink_prices(&sender),
-                stream_15m_rolling_5m_market_window(&gamma, &client, "btc", &sender),
-                stream_15m_rolling_5m_market_window(&gamma, &client, "eth", &sender),
-                stream_15m_rolling_5m_market_window(&gamma, &client, "sol", &sender),
-                stream_15m_rolling_5m_market_window(&gamma, &client, "xrp", &sender),
-                stream_15m_rolling_5m_market_window(&gamma, &client, "bnb", &sender),
-                stream_15m_rolling_5m_market_window(&gamma, &client, "doge", &sender),
-                stream_15m_rolling_5m_market_window(&gamma, &client, "hype", &sender),
+                stream_market_5m(&gamma, &client, "btc", &sender),
+                stream_market_5m(&gamma, &client, "eth", &sender),
+                stream_market_5m(&gamma, &client, "sol", &sender),
+                stream_market_5m(&gamma, &client, "xrp", &sender),
+                stream_market_5m(&gamma, &client, "bnb", &sender),
+                stream_market_5m(&gamma, &client, "doge", &sender),
+                stream_market_5m(&gamma, &client, "hype", &sender),
+                stream_market_15m(&gamma, &client, "btc", &sender),
+                stream_market_15m(&gamma, &client, "eth", &sender),
+                stream_market_15m(&gamma, &client, "sol", &sender),
+                stream_market_15m(&gamma, &client, "xrp", &sender),
+                stream_market_15m(&gamma, &client, "bnb", &sender),
+                stream_market_15m(&gamma, &client, "doge", &sender),
+                stream_market_15m(&gamma, &client, "hype", &sender),
             ).map(|_| ())
         } => result,
         result = tokio::signal::ctrl_c() => result.map_err(Into::into),
@@ -59,15 +66,16 @@ pub struct MarketContext {
     pub end_time: u64,
 }
 
-async fn stream_15m_rolling_5m_market_window(
+async fn stream_market_5m(
     gamma: &GammaClient,
     client: &ClobClient,
     asset: &str,
     sender: &mpsc::Sender<database::Message>,
 ) -> Result<()> {
-    let start = current_market_start();
-    let mut curr = get_market_context(gamma, asset, start, sender).await?;
-    let mut next = get_market_context(gamma, asset, start + 300, sender).await?;
+    let minutes = 5;
+    let start = current_market_start(minutes);
+    let mut curr = get_market_context(gamma, asset, start, minutes, sender).await?;
+    let mut next = get_market_context(gamma, asset, start + minutes * 60, minutes, sender).await?;
 
     loop {
         let end = UNIX_EPOCH + Duration::from_secs(curr.end_time);
@@ -90,27 +98,64 @@ async fn stream_15m_rolling_5m_market_window(
         result?;
 
         curr = next;
-        next = get_market_context(gamma, asset, curr.end_time, sender).await?;
+        next = get_market_context(gamma, asset, curr.end_time, minutes, sender).await?;
     }
 }
 
-fn current_market_start() -> u64 {
+async fn stream_market_15m(
+    gamma: &GammaClient,
+    client: &ClobClient,
+    asset: &str,
+    sender: &mpsc::Sender<database::Message>,
+) -> Result<()> {
+    let minutes = 15;
+    let start = current_market_start(minutes);
+    let mut curr = get_market_context(gamma, asset, start, minutes, sender).await?;
+    let mut next = get_market_context(gamma, asset, start + minutes * 60, minutes, sender).await?;
+
+    loop {
+        let end = UNIX_EPOCH + Duration::from_secs(curr.end_time);
+        let remaining = end.duration_since(SystemTime::now()).unwrap_or_default();
+
+        let result = tokio::select! {
+            biased;
+            _ = tokio::time::sleep(remaining) => Ok(()),
+            result = async {
+                tokio::try_join!(
+                    stream_best_bid_ask(client, &curr, sender),
+                    stream_last_trade_price(client, &curr, sender)
+                ).map(|_| ())
+            } => result,
+        };
+
+        let token_ids = [curr.up_token_id, curr.down_token_id];
+        client.unsubscribe_orderbook(&token_ids)?;
+        client.unsubscribe_orderbook(&token_ids)?;
+        result?;
+
+        curr = next;
+        next = get_market_context(gamma, asset, curr.end_time, minutes, sender).await?;
+    }
+}
+
+fn current_market_start(minutes: u64) -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
-        / 300
-        * 300
+        / (minutes * 60)
+        * (minutes * 60)
 }
 
 async fn get_market_context(
     gamma: &GammaClient,
     asset: &str,
     start: u64,
+    minutes: u64,
     sender: &mpsc::Sender<database::Message>,
 ) -> Result<MarketContext> {
     let asset = asset.trim().to_ascii_lowercase();
-    let slug = format!("{asset}-updown-5m-{start}");
+    let slug = format!("{asset}-updown-{minutes}m-{start}");
     let market = gamma
         .market_by_slug(&MarketBySlugRequest::builder().slug(slug.clone()).build())
         .await
@@ -137,7 +182,7 @@ async fn get_market_context(
         up_token_id: token_ids[up],
         down_token_id: token_ids[down],
         start_time: start,
-        end_time: start + 300,
+        end_time: start + minutes * 60,
     };
     sender
         .send(database::Message {

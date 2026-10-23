@@ -45,20 +45,22 @@ pub fn setup() -> WorkerGuard {
     guard
 }
 
-pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, &'static str)>) {
-    let (asset, start, kind, outcome, details) = match &message.event {
+pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, u64, &'static str)>) {
+    let (asset, start, minutes, kind, outcome, details) = match &message.event {
         Event::Market(market) => {
+            let minutes = (market.end_time - market.start_time) / 60;
             labels.insert(
                 market.up_token_id,
-                (market.asset.clone(), market.start_time, "UP"),
+                (market.asset.clone(), market.start_time, minutes, "UP"),
             );
             labels.insert(
                 market.down_token_id,
-                (market.asset.clone(), market.start_time, "DOWN"),
+                (market.asset.clone(), market.start_time, minutes, "DOWN"),
             );
             (
                 market.asset.clone(),
                 market.start_time,
+                minutes,
                 "MARKET",
                 "-".to_owned(),
                 format!("slug={}", market.slug),
@@ -70,23 +72,26 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, &'stati
                 .strip_suffix("usdt")
                 .unwrap_or(&price.symbol)
                 .to_owned(),
-            u64::try_from(price.timestamp / 1000).unwrap() / 300 * 300,
+            u64::try_from(price.timestamp / 1000).unwrap(),
+            0,
             "BINANCE",
             price.value.to_string(),
             String::new(),
         ),
         Event::Chainlink(price) => (
             price.symbol.split('/').next().unwrap().to_owned(),
-            u64::try_from(price.timestamp / 1000).unwrap() / 300 * 300,
+            u64::try_from(price.timestamp / 1000).unwrap(),
+            0,
             "CHAINLINK",
             price.value.to_string(),
             String::new(),
         ),
         Event::BidAsk(quote) => {
-            let (asset, start, outcome) = labels.get(&quote.asset_id).unwrap();
+            let (asset, start, minutes, outcome) = labels.get(&quote.asset_id).unwrap();
             (
                 asset.clone(),
                 *start,
+                *minutes,
                 "QUOTE",
                 outcome.to_string(),
                 format!(
@@ -98,7 +103,7 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, &'stati
             )
         }
         Event::Trade(trade) => {
-            let (asset, start, outcome) = labels.get(&trade.asset_id).unwrap();
+            let (asset, start, minutes, outcome) = labels.get(&trade.asset_id).unwrap();
             let side = match trade.side {
                 Some(Side::Buy) => "BUY",
                 Some(Side::Sell) => "SELL",
@@ -111,6 +116,7 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, &'stati
             (
                 asset.clone(),
                 *start,
+                *minutes,
                 "TRADE",
                 outcome.to_string(),
                 format!(
@@ -123,9 +129,16 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, &'stati
     };
     let asset = asset.to_ascii_uppercase();
     let time = format!("{:02}:{:02}", start / 3600 % 24, start / 60 % 60);
-    if details.is_empty() {
-        tracing::info!("{asset:<5} | 5m | {time} | {kind:<9} | {outcome}");
+    let interval = if minutes == 0 {
+        "-".to_owned()
     } else {
-        tracing::info!("{asset:<5} | 5m | {time} | {kind:<9} | {outcome:<4} | {details}");
+        format!("{minutes}m")
+    };
+    if details.is_empty() {
+        tracing::info!("{asset:<5} | {interval:<3} | {time} | {kind:<9} | {outcome}");
+    } else {
+        tracing::info!(
+            "{asset:<5} | {interval:<3} | {time} | {kind:<9} | {outcome:<4} | {details}"
+        );
     }
 }
