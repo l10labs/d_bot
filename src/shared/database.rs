@@ -5,7 +5,7 @@ use polymarket_client_sdk_v2::{
         ws::types::response::{BestBidAsk, LastTradePrice},
     },
     rtds::{ChainlinkPrice, CryptoPrice},
-    types::U256,
+    types::{B256, U256},
 };
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -64,6 +64,207 @@ pub async fn writer(
     }
 
     Ok(())
+}
+
+pub async fn load_all(connection: &mut Connection) -> Result<Vec<Message>> {
+    let progress = indicatif::ProgressBar::new_spinner();
+    progress.set_style(indicatif::ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] {wide_bar:.cyan/blue} {pos}/{len} events ({per_sec}, ETA {eta}) {msg}",
+    )?);
+    progress.set_message("Counting events");
+    progress.enable_steady_tick(std::time::Duration::from_millis(100));
+    let result = async {
+        let transaction = connection.transaction().await?;
+        let messages = load_snapshot(&transaction, &progress).await?;
+        transaction.commit().await?;
+        Ok(messages)
+    }
+    .await;
+    match &result {
+        Ok(_) => progress.finish_with_message("Loaded and sorted"),
+        Err(_) => progress.abandon_with_message("Loading failed"),
+    }
+    result
+}
+
+fn update_load_progress(progress: &indicatif::ProgressBar, loaded: usize) {
+    if loaded % 4096 == 0 {
+        progress.set_position(loaded as u64);
+    }
+}
+
+async fn load_snapshot(
+    connection: &Connection,
+    progress: &indicatif::ProgressBar,
+) -> Result<Vec<Message>> {
+    let mut counts = connection
+        .query(
+            "SELECT (SELECT count(*) FROM markets) + (SELECT count(*) FROM prices_binance)
+         + (SELECT count(*) FROM prices_chainlink) + (SELECT count(*) FROM market_bid_asks)
+         + (SELECT count(*) FROM market_trades)",
+            (),
+        )
+        .await?;
+    let count = usize::try_from(counts.next().await?.unwrap().get::<i64>(0)?)?;
+    drop(counts);
+    progress.set_length(count as u64);
+    progress.set_message("Loading token identities");
+    let mut messages = Vec::new();
+    messages.try_reserve_exact(count)?;
+
+    let mut tokens = HashMap::<i64, (U256, B256)>::new();
+    let mut market_tokens = HashMap::<i64, (Option<U256>, Option<U256>)>::new();
+    let mut rows = connection
+        .query(
+            "SELECT t.id, t.token_id, t.market_id, t.outcome, m.condition_id
+         FROM market_tokens t JOIN markets m ON m.id = t.market_id",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let id = row.get::<i64>(0)?;
+        let token = row.get::<String>(1)?.parse::<U256>()?;
+        let market_id = row.get::<i64>(2)?;
+        let outcome = row.get::<String>(3)?;
+        let condition = row.get::<String>(4)?.parse::<B256>()?;
+        tokens.insert(id, (token, condition));
+        let pair = market_tokens.entry(market_id).or_default();
+        match outcome.as_str() {
+            "up" => pair.0 = Some(token),
+            "down" => pair.1 = Some(token),
+            _ => return Err(std::io::Error::other("Invalid market outcome").into()),
+        }
+    }
+    drop(rows);
+    progress.set_message("Loading markets");
+
+    let mut rows = connection
+        .query(
+            "SELECT id, condition_id, asset, slug, starts_at, ends_at, discovered_at FROM markets",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let pair = market_tokens
+            .get(&row.get::<i64>(0)?)
+            .ok_or_else(|| std::io::Error::other("Market has no tokens"))?;
+        let missing = || std::io::Error::other("Market is missing an up/down token");
+        messages.push(Message {
+            received_at: row.get(6)?,
+            event: Event::Market(MarketContext {
+                condition_id: row.get::<String>(1)?.parse()?,
+                asset: row.get(2)?,
+                slug: row.get(3)?,
+                start_time: u64::try_from(row.get::<i64>(4)?)? / 1000,
+                end_time: u64::try_from(row.get::<i64>(5)?)? / 1000,
+                up_token_id: pair.0.ok_or_else(missing)?,
+                down_token_id: pair.1.ok_or_else(missing)?,
+            }),
+        });
+        update_load_progress(progress, messages.len());
+    }
+    drop(rows);
+    drop(market_tokens);
+
+    for (table, chainlink) in [("prices_binance", false), ("prices_chainlink", true)] {
+        progress.set_message(format!("Loading {table}"));
+        let mut rows = connection
+            .query(
+                format!("SELECT symbol, price, source_at, received_at FROM {table}"),
+                (),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let symbol = row.get::<String>(0)?;
+            let value = row.get::<String>(1)?.parse()?;
+            let timestamp = row.get::<i64>(2)?;
+            let event = if chainlink {
+                Event::Chainlink(
+                    ChainlinkPrice::builder()
+                        .symbol(symbol)
+                        .value(value)
+                        .timestamp(timestamp)
+                        .build(),
+                )
+            } else {
+                Event::Binance(
+                    CryptoPrice::builder()
+                        .symbol(symbol)
+                        .value(value)
+                        .timestamp(timestamp)
+                        .build(),
+                )
+            };
+            messages.push(Message {
+                received_at: row.get(3)?,
+                event,
+            });
+            update_load_progress(progress, messages.len());
+        }
+    }
+
+    progress.set_message("Loading bid/ask quotes");
+    let mut rows = connection.query(
+        "SELECT market_token_id, best_bid, best_ask, spread, source_at, received_at FROM market_bid_asks", (),
+    ).await?;
+    while let Some(row) = rows.next().await? {
+        let &(asset_id, market) = tokens
+            .get(&row.get::<i64>(0)?)
+            .ok_or_else(|| std::io::Error::other("Quote references unknown token"))?;
+        let quote = BestBidAsk::builder()
+            .asset_id(asset_id)
+            .market(market)
+            .best_bid(row.get::<String>(1)?.parse()?)
+            .best_ask(row.get::<String>(2)?.parse()?)
+            .spread(row.get::<String>(3)?.parse()?)
+            .timestamp(row.get::<i64>(4)?)
+            .build();
+        messages.push(Message {
+            received_at: row.get(5)?,
+            event: Event::BidAsk(quote),
+        });
+        update_load_progress(progress, messages.len());
+    }
+    drop(rows);
+
+    progress.set_message("Loading trades");
+    let mut rows = connection.query(
+        "SELECT market_token_id, price, size, side, fee_rate_bps, source_at, received_at FROM market_trades", (),
+    ).await?;
+    while let Some(row) = rows.next().await? {
+        let &(asset_id, market) = tokens
+            .get(&row.get::<i64>(0)?)
+            .ok_or_else(|| std::io::Error::other("Trade references unknown token"))?;
+        let mut trade = LastTradePrice::builder()
+            .asset_id(asset_id)
+            .market(market)
+            .price(row.get::<String>(1)?.parse()?)
+            .timestamp(row.get::<i64>(5)?)
+            .build();
+        trade.size = row
+            .get::<Option<String>>(2)?
+            .map(|s| s.parse())
+            .transpose()?;
+        trade.side = match row.get::<Option<String>>(3)?.as_deref() {
+            Some("buy") => Some(Side::Buy),
+            Some("sell") => Some(Side::Sell),
+            None => None,
+            _ => return Err(std::io::Error::other("Invalid trade side").into()),
+        };
+        trade.fee_rate_bps = row
+            .get::<Option<String>>(4)?
+            .map(|s| s.parse())
+            .transpose()?;
+        messages.push(Message {
+            received_at: row.get(6)?,
+            event: Event::Trade(trade),
+        });
+        update_load_progress(progress, messages.len());
+    }
+    progress.set_position(messages.len() as u64);
+    progress.set_message("Sorting by receipt timestamp");
+    messages.sort_unstable_by_key(|message| message.received_at);
+    Ok(messages)
 }
 
 async fn write_event(
@@ -149,7 +350,7 @@ async fn write_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Message, setup, writer};
+    use super::{Event, Message, load_all, setup, writer};
     use crate::shared::MarketContext;
     use polymarket_client_sdk_v2::types::{B256, U256};
     use serde_json::json;
@@ -203,6 +404,42 @@ mod tests {
         drop(sender);
         writer(connection.clone(), receiver).await.unwrap();
 
+        let mut reader = connection.clone();
+        let loaded = load_all(&mut reader).await.unwrap();
+        assert_eq!(loaded.len(), 5);
+        assert!(
+            loaded
+                .windows(2)
+                .all(|pair| pair[0].received_at <= pair[1].received_at)
+        );
+        for message in &loaded {
+            assert_eq!(message.received_at, 300005);
+            match &message.event {
+                Event::Market(market) => {
+                    assert_eq!(market.start_time, 300);
+                    assert_eq!(market.end_time, 600);
+                    assert_eq!(market.up_token_id, U256::from(1));
+                    assert_eq!(market.down_token_id, U256::from(2));
+                }
+                Event::BidAsk(quote) => {
+                    assert_eq!(quote.asset_id, U256::from(1));
+                    assert_eq!(quote.market, B256::ZERO);
+                    assert_eq!(quote.best_bid.to_string(), "0.45");
+                    assert_eq!(quote.timestamp, 300001);
+                }
+                Event::Trade(trade) => {
+                    assert_eq!(trade.asset_id, U256::from(2));
+                    assert_eq!(trade.size.unwrap().to_string(), "12.5");
+                    assert!(trade.fee_rate_bps.is_none());
+                    assert_eq!(
+                        trade.side,
+                        Some(polymarket_client_sdk_v2::clob::types::Side::Buy)
+                    );
+                }
+                Event::Binance(price) => assert_eq!(price.value.to_string(), "81234.12345678"),
+                Event::Chainlink(price) => assert_eq!(price.value.to_string(), "81230.98765432"),
+            }
+        }
         for (table, count) in [
             ("markets", 1),
             ("market_tokens", 2),
@@ -251,6 +488,32 @@ mod tests {
             .await
             .unwrap();
         assert!(rows.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn loads_empty_database() {
+        let mut connection = setup(":memory:").await.unwrap();
+        assert!(load_all(&mut connection).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn loads_in_receipt_timestamp_order() {
+        let mut connection = setup(":memory:").await.unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO prices_binance (symbol, asset, price, source_at, received_at)
+             VALUES ('btcusdt', 'btc', '1.23', 999, 30), ('ethusdt', 'eth', '4.56', 1, 10);
+             INSERT INTO prices_chainlink (symbol, asset, price, source_at, received_at)
+             VALUES ('btc/usd', 'btc', '7.89', 0, 20);",
+            )
+            .await
+            .unwrap();
+        let messages = load_all(&mut connection).await.unwrap();
+        assert_eq!(
+            messages.iter().map(|m| m.received_at).collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
+        assert!(matches!(messages[1].event, Event::Chainlink(_)));
     }
 
     #[tokio::test]
