@@ -1,16 +1,16 @@
-use database::{Event, Result};
+use d_bot::shared::{
+    MarketContext,
+    database::{self, Event, Result},
+    logging,
+};
 use futures::StreamExt;
 use polymarket_client_sdk_v2::{
     clob::ws::Client as ClobClient,
     gamma::{Client as GammaClient, types::request::MarketBySlugRequest},
     rtds::{ChainlinkPrice, Client, CryptoPrice},
-    types::{B256, U256},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-
-mod database;
-mod logging;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -53,17 +53,6 @@ async fn main() -> Result<()> {
     drop(sender);
     writer.await??;
     result
-}
-
-#[derive(Debug, Clone)]
-pub struct MarketContext {
-    pub asset: String,
-    pub slug: String,
-    pub condition_id: B256,
-    pub up_token_id: U256,
-    pub down_token_id: U256,
-    pub start_time: u64,
-    pub end_time: u64,
 }
 
 async fn stream_market_5m(

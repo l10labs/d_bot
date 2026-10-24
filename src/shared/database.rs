@@ -1,4 +1,4 @@
-use crate::MarketContext;
+use crate::shared::MarketContext;
 use polymarket_client_sdk_v2::{
     clob::{
         types::Side,
@@ -37,7 +37,7 @@ pub async fn setup(path: &str) -> turso::Result<turso::Connection> {
     connection
         .execute_batch(concat!(
             "BEGIN;\n",
-            include_str!("../schema.sql"),
+            include_str!("../../schema.sql"),
             "\nCOMMIT;"
         ))
         .await?;
@@ -59,7 +59,7 @@ pub async fn writer(
         }
         transaction.commit().await?;
         for message in batch.drain(..) {
-            crate::logging::event(&message, &mut labels);
+            super::logging::event(&message, &mut labels);
         }
     }
 
@@ -150,7 +150,7 @@ async fn write_event(
 #[cfg(test)]
 mod tests {
     use super::{Event, Message, setup, writer};
-    use crate::MarketContext;
+    use crate::shared::MarketContext;
     use polymarket_client_sdk_v2::types::{B256, U256};
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -257,7 +257,7 @@ mod tests {
     async fn initializes_schema_and_can_run_again() {
         let connection = setup(":memory:").await.unwrap();
         connection
-            .execute_batch(include_str!("../schema.sql"))
+            .execute_batch(include_str!("../../schema.sql"))
             .await
             .unwrap();
 
