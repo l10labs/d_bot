@@ -21,7 +21,7 @@ impl tracing_subscriber::fmt::time::FormatTime for CompactTime {
         let meridiem = if hour < 12 { "AM" } else { "PM" };
         write!(
             writer,
-            "{:02}:{:02}:{:02}.{:03} {meridiem}",
+            "{:02}:{:02}:{:02}.{:03}{meridiem}",
             (hour + 11) % 12 + 1,
             seconds / 60 % 60,
             seconds % 60,
@@ -113,7 +113,7 @@ impl WriteSummary {
         ] = self.counts;
         let total: u64 = self.counts[1..].iter().sum();
         tracing::info!(
-            "5M-Q({quotes5:03})|5M-T({trades5:03})|15M-Q({quotes15:03})|15M-T({trades15:03})|BNAN-P({binance:03})|CNLK-P({chainlink:03})|TOTAL({total:03})|COMMITS({:03})|EVENTS/SEC({:05.1})",
+            "5M-Q({quotes5:03}) | 5M-T({trades5:03}) | 15M-Q({quotes15:03}) | 15M-T({trades15:03}) | BNAN-P({binance:03}) | CNLK-P({chainlink:03}) | TOTAL({total:03}) | COMMITS({:03}) | EVENTS/SEC({:05.1})",
             self.commits,
             total as f64 / elapsed.as_secs_f64().max(f64::EPSILON),
         );
@@ -139,38 +139,34 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, u64, &'
                 (market.asset.clone(), market.start_time, minutes, "DOWN"),
             );
             let asset = market.asset.to_ascii_uppercase();
-            let interval = format!("{minutes}M");
+            let interval = format!("{minutes}m");
             let start = market.start_time;
             let hour = start / 3600 % 24;
             let meridiem = if hour < 12 { "AM" } else { "PM" };
             let hour12 = (hour + 11) % 12 + 1;
             tracing::info!(
-                "MARKET|{asset:>4}|{interval:>3}|{hour12:02}:{:02} {meridiem}|SLUG({:>26})",
+                "MKRT | {asset:>4} | {interval:>3} | {hour12:02}:{:02}{meridiem} | SLUG({:>26})",
                 start / 60 % 60,
                 market.slug,
             );
             return;
         }
-        Event::Binance(price) => (
-            price
+        Event::Binance(price) => {
+            let asset = price.symbol.to_ascii_uppercase();
+            let asset = asset.strip_suffix("USDT").unwrap_or(&asset);
+            tracing::info!("BNAN | {asset:>4} | ${:<12}", price.value.to_string());
+            return;
+        }
+        Event::Chainlink(price) => {
+            let asset = price
                 .symbol
-                .strip_suffix("usdt")
+                .split('/')
+                .next()
                 .unwrap_or(&price.symbol)
-                .to_owned(),
-            u64::try_from(price.timestamp / 1000).unwrap(),
-            0,
-            "BINANCE",
-            price.value.to_string(),
-            String::new(),
-        ),
-        Event::Chainlink(price) => (
-            price.symbol.split('/').next().unwrap().to_owned(),
-            u64::try_from(price.timestamp / 1000).unwrap(),
-            0,
-            "CHAINLINK",
-            price.value.to_string(),
-            String::new(),
-        ),
+                .to_ascii_uppercase();
+            tracing::info!("CNLK | {asset:>4} | ${:<12}", price.value.to_string());
+            return;
+        }
         Event::BidAsk(quote) => {
             let (asset, start, minutes, outcome) = labels.get(&quote.asset_id).unwrap();
             (
@@ -180,7 +176,7 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, u64, &'
                 "QUOTE",
                 outcome.to_string(),
                 format!(
-                    "     | {:<12} | {:<12} | SP({})",
+                    "{:<12} | {:<12} | SP({})",
                     format!("BD({})", quote.best_bid),
                     format!("AK({})", quote.best_ask),
                     quote.spread
@@ -205,7 +201,7 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, u64, &'
                 "TRADE",
                 outcome.to_string(),
                 format!(
-                    "{side:<4} | {:<12} | {:<12}",
+                    "{side:<12} | {:<12} | {:<12}",
                     format!("PR({})", trade.price),
                     format!("SZ({size})")
                 ),
@@ -216,20 +212,10 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, u64, &'
     let hour = start / 3600 % 24;
     let meridiem = if hour < 12 { "AM" } else { "PM" };
     let time = format!(
-        "{:02}:{:02} {meridiem}",
+        "{:02}:{:02}{meridiem}",
         (hour + 11) % 12 + 1,
         start / 60 % 60
     );
-    let interval = if minutes == 0 {
-        "-".to_owned()
-    } else {
-        format!("{minutes}m")
-    };
-    if details.is_empty() {
-        tracing::info!("{asset:<5} | {interval:<3} | {time} | {kind:<9} | {outcome}");
-    } else {
-        tracing::info!(
-            "{asset:<5} | {interval:<3} | {time} | {kind:<9} | {outcome:<4} | {details}"
-        );
-    }
+    let interval = format!("{minutes}m");
+    tracing::info!("MKRT | {asset:>4} | {interval:>3} | {time} | {kind:<5} | {outcome:<4} | {details}");
 }
