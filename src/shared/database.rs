@@ -44,26 +44,66 @@ pub async fn setup(path: &str) -> turso::Result<turso::Connection> {
     Ok(connection)
 }
 
-pub async fn writer(
+pub async fn writer(connection: Connection, receiver: mpsc::Receiver<Message>) -> Result<()> {
+    writer_with_verbose(connection, receiver, false).await
+}
+
+pub async fn writer_with_verbose(
     mut connection: Connection,
     mut receiver: mpsc::Receiver<Message>,
+    verbose: bool,
 ) -> Result<()> {
     let mut token_ids = HashMap::new();
     let mut batch = Vec::with_capacity(256);
+    let mut summary = super::logging::WriteSummary::default();
     let mut labels = HashMap::new();
+    let period = std::time::Duration::from_secs(1);
+    let mut last_report = tokio::time::Instant::now();
+    let mut ticker = tokio::time::interval_at(last_report + period, period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    while receiver.recv_many(&mut batch, 256).await > 0 {
-        let transaction = connection.transaction().await?;
-        for message in &batch {
-            write_event(&transaction, &mut token_ids, message).await?;
+    let result: Result<()> = async {
+        loop {
+            tokio::select! {
+                biased;
+                _ = ticker.tick(), if !verbose => {
+                    let now = tokio::time::Instant::now();
+                    summary.report(now.duration_since(last_report));
+                    last_report = now;
+                }
+                count = receiver.recv_many(&mut batch, 256) => {
+                    if count == 0 {
+                        break;
+                    }
+                    let transaction = connection.transaction().await?;
+                    for message in &batch {
+                        write_event(&transaction, &mut token_ids, message).await?;
+                    }
+                    transaction.commit().await?;
+                    if verbose {
+                        for message in &batch {
+                            super::logging::event(message, &mut labels);
+                        }
+                    } else {
+                        for message in &batch {
+                            if matches!(&message.event, Event::Market(_)) {
+                                super::logging::event(message, &mut labels);
+                            }
+                        }
+                        summary.committed(&batch);
+                    }
+                    batch.clear();
+                }
+            }
         }
-        transaction.commit().await?;
-        for message in batch.drain(..) {
-            super::logging::event(&message, &mut labels);
-        }
+        Ok(())
     }
+    .await;
 
-    Ok(())
+    if !summary.is_empty() {
+        summary.report(last_report.elapsed());
+    }
+    result
 }
 
 pub async fn load_all(connection: &mut Connection) -> Result<Vec<Message>> {

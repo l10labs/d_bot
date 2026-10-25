@@ -14,10 +14,23 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _logging = logging::setup();
+    let mut verbose = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-v" | "--verbose" => verbose = true,
+            "-h" | "--help" => {
+                println!(
+                    "Usage: reader [-v|--verbose]\n  -v, --verbose  Log individual committed events instead of per-second summaries"
+                );
+                return Ok(());
+            }
+            _ => return Err(std::io::Error::other(format!("Unknown argument: {arg}")).into()),
+        }
+    }
+    let _logging = logging::setup()?;
     let connection = database::setup("markets.db").await?;
     let (sender, receiver) = mpsc::channel(25_600);
-    let mut writer = tokio::spawn(database::writer(connection, receiver));
+    let mut writer = tokio::spawn(database::writer_with_verbose(connection, receiver, verbose));
 
     let gamma = GammaClient::default();
     let client = ClobClient::default();
