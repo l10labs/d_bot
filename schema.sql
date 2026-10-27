@@ -17,6 +17,16 @@ CREATE TABLE IF NOT EXISTS market_tokens (
     UNIQUE (market_id, outcome)
 );
 
+-- One confirmed winner per market. observed_at is local receipt time, not oracle time.
+CREATE TABLE IF NOT EXISTS market_resolutions (
+    market_id INTEGER PRIMARY KEY REFERENCES markets(id),
+    winning_token_id INTEGER NOT NULL REFERENCES market_tokens(id),
+    observed_at INTEGER NOT NULL,
+    source TEXT NOT NULL CHECK (source = 'clob')
+);
+
+CREATE INDEX IF NOT EXISTS markets_end_time_idx ON markets (ends_at, id);
+
 CREATE TABLE IF NOT EXISTS prices_chainlink (
     id INTEGER PRIMARY KEY,
     asset TEXT NOT NULL,

@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
     }
     let _logging = logging::setup()?;
     let connection = database::setup("markets.db").await?;
+    let resolution_connection = database::setup("markets.db").await?;
     let (sender, receiver) = mpsc::channel(25_600);
     let mut writer = tokio::spawn(database::writer_with_verbose(connection, receiver, verbose));
 
@@ -38,6 +39,7 @@ async fn main() -> Result<()> {
     let result = tokio::select! {
         result = async {
             tokio::try_join!(
+                d_bot::shared::resolutions::poll(resolution_connection),
                 stream_binance_prices(&sender),
                 stream_coinbase_prices(&sender),
                 stream_chainlink_prices(&sender),

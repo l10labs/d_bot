@@ -598,6 +598,7 @@ mod tests {
             names,
             [
                 "market_bid_asks",
+                "market_resolutions",
                 "market_tokens",
                 "market_trades",
                 "markets",
