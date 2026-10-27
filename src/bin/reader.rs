@@ -3,7 +3,7 @@ use d_bot::shared::{
     database::{self, Event, Result},
     logging,
 };
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use polymarket_client_sdk_v2::{
     clob::ws::Client as ClobClient,
     gamma::{Client as GammaClient, types::request::MarketBySlugRequest},
@@ -39,6 +39,7 @@ async fn main() -> Result<()> {
         result = async {
             tokio::try_join!(
                 stream_binance_prices(&sender),
+                stream_coinbase_prices(&sender),
                 stream_chainlink_prices(&sender),
                 stream_market_5m(&gamma, &client, "btc", &sender),
                 stream_market_5m(&gamma, &client, "eth", &sender),
@@ -257,6 +258,64 @@ async fn stream_binance_prices(sender: &mpsc::Sender<database::Message>) -> Resu
     }
 
     Ok(())
+}
+
+async fn stream_coinbase_prices(sender: &mpsc::Sender<database::Message>) -> Result<()> {
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    let (mut socket, _) = connect_async("wss://ws-feed.exchange.coinbase.com").await?;
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "subscribe",
+                "product_ids": ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD"],
+                "channels": ["ticker", "heartbeat"]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+
+    while let Some(message) = tokio::time::timeout(Duration::from_secs(30), socket.next()).await? {
+        match message? {
+            Message::Text(text) => {
+                let received_at = received_at_ms();
+                let message: serde_json::Value = serde_json::from_str(&text)?;
+                match message["type"].as_str() {
+                    Some("ticker") => {
+                        let field = |name: &str| {
+                            message[name].as_str().ok_or_else(|| {
+                                std::io::Error::other(format!("Coinbase ticker missing {name}"))
+                            })
+                        };
+                        let price = CryptoPrice::builder()
+                            .symbol(field("product_id")?.to_ascii_lowercase())
+                            .value(field("price")?.parse()?)
+                            .timestamp(
+                                chrono::DateTime::parse_from_rfc3339(field("time")?)?
+                                    .timestamp_millis(),
+                            )
+                            .build();
+                        sender
+                            .send(database::Message {
+                                received_at,
+                                event: Event::Coinbase(price),
+                            })
+                            .await?;
+                    }
+                    Some("error") => {
+                        return Err(std::io::Error::other(format!("Coinbase: {message}")).into());
+                    }
+                    _ => {}
+                }
+            }
+            Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    Err(std::io::Error::other("Coinbase price stream closed").into())
 }
 
 async fn stream_chainlink_prices(sender: &mpsc::Sender<database::Message>) -> Result<()> {

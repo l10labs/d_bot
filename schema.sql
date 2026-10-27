@@ -45,6 +45,20 @@ CREATE INDEX IF NOT EXISTS prices_binance_asset_source_time_idx
 CREATE INDEX IF NOT EXISTS prices_binance_received_time_idx
     ON prices_binance (received_at, id);
 
+CREATE TABLE IF NOT EXISTS prices_coinbase (
+    id INTEGER PRIMARY KEY,
+    asset TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    price TEXT NOT NULL,
+    source_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS prices_coinbase_asset_source_time_idx
+    ON prices_coinbase (asset, source_at, id);
+CREATE INDEX IF NOT EXISTS prices_coinbase_received_time_idx
+    ON prices_coinbase (received_at, id);
+
 CREATE TABLE IF NOT EXISTS market_bid_asks (
     id INTEGER PRIMARY KEY,
     market_token_id INTEGER NOT NULL REFERENCES market_tokens(id),

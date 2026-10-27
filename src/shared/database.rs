@@ -23,6 +23,7 @@ pub struct Message {
 pub enum Event {
     Market(MarketContext),
     Binance(CryptoPrice),
+    Coinbase(CryptoPrice),
     Chainlink(ChainlinkPrice),
     BidAsk(BestBidAsk),
     Trade(LastTradePrice),
@@ -140,7 +141,7 @@ async fn load_snapshot(
     let mut counts = connection
         .query(
             "SELECT (SELECT count(*) FROM markets) + (SELECT count(*) FROM prices_binance)
-         + (SELECT count(*) FROM prices_chainlink) + (SELECT count(*) FROM market_bid_asks)
+         + (SELECT count(*) FROM prices_coinbase) + (SELECT count(*) FROM prices_chainlink) + (SELECT count(*) FROM market_bid_asks)
          + (SELECT count(*) FROM market_trades)",
             (),
         )
@@ -206,7 +207,7 @@ async fn load_snapshot(
     drop(rows);
     drop(market_tokens);
 
-    for (table, chainlink) in [("prices_binance", false), ("prices_chainlink", true)] {
+    for table in ["prices_binance", "prices_coinbase", "prices_chainlink"] {
         progress.set_message(format!("Loading {table}"));
         let mut rows = connection
             .query(
@@ -218,22 +219,24 @@ async fn load_snapshot(
             let symbol = row.get::<String>(0)?;
             let value = row.get::<String>(1)?.parse()?;
             let timestamp = row.get::<i64>(2)?;
-            let event = if chainlink {
-                Event::Chainlink(
-                    ChainlinkPrice::builder()
-                        .symbol(symbol)
-                        .value(value)
-                        .timestamp(timestamp)
-                        .build(),
-                )
+            let event = if table == "prices_chainlink" {
+                let price = ChainlinkPrice::builder()
+                    .symbol(symbol)
+                    .value(value)
+                    .timestamp(timestamp)
+                    .build();
+                Event::Chainlink(price)
             } else {
-                Event::Binance(
-                    CryptoPrice::builder()
-                        .symbol(symbol)
-                        .value(value)
-                        .timestamp(timestamp)
-                        .build(),
-                )
+                let price = CryptoPrice::builder()
+                    .symbol(symbol)
+                    .value(value)
+                    .timestamp(timestamp)
+                    .build();
+                if table == "prices_coinbase" {
+                    Event::Coinbase(price)
+                } else {
+                    Event::Binance(price)
+                }
             };
             messages.push(Message {
                 received_at: row.get(3)?,
@@ -349,6 +352,13 @@ async fn write_event(
                 params![asset, price.symbol.as_str(), price.value.to_string(), price.timestamp, received_at],
             ).await?;
         }
+        Event::Coinbase(price) => {
+            let asset = price.symbol.split('-').next().unwrap();
+            connection.execute(
+                "INSERT INTO prices_coinbase (asset, symbol, price, source_at, received_at) VALUES (?, ?, ?, ?, ?)",
+                params![asset, price.symbol.as_str(), price.value.to_string(), price.timestamp, received_at],
+            ).await?;
+        }
         Event::Chainlink(price) => {
             let asset = price.symbol.split('/').next().unwrap();
             connection.execute(
@@ -433,6 +443,12 @@ mod tests {
             Event::BidAsk(quote),
             Event::Trade(trade),
             Event::Binance(binance),
+            Event::Coinbase(
+                serde_json::from_value(json!({
+                    "symbol": "btc-usd", "value": "81235.12345678", "timestamp": 300003
+                }))
+                .unwrap(),
+            ),
             Event::Chainlink(chainlink),
         ] {
             let message = Message {
@@ -446,7 +462,7 @@ mod tests {
 
         let mut reader = connection.clone();
         let loaded = load_all(&mut reader).await.unwrap();
-        assert_eq!(loaded.len(), 5);
+        assert_eq!(loaded.len(), 6);
         assert!(
             loaded
                 .windows(2)
@@ -476,6 +492,11 @@ mod tests {
                         Some(polymarket_client_sdk_v2::clob::types::Side::Buy)
                     );
                 }
+                Event::Coinbase(price) => {
+                    assert_eq!(price.symbol, "btc-usd");
+                    assert_eq!(price.timestamp, 300003);
+                    assert_eq!(price.value.to_string(), "81235.12345678");
+                }
                 Event::Binance(price) => assert_eq!(price.value.to_string(), "81234.12345678"),
                 Event::Chainlink(price) => assert_eq!(price.value.to_string(), "81230.98765432"),
             }
@@ -486,6 +507,7 @@ mod tests {
             ("market_bid_asks", 1),
             ("market_trades", 1),
             ("prices_binance", 1),
+            ("prices_coinbase", 1),
             ("prices_chainlink", 1),
         ] {
             let mut rows = connection
@@ -580,7 +602,8 @@ mod tests {
                 "market_trades",
                 "markets",
                 "prices_binance",
-                "prices_chainlink"
+                "prices_chainlink",
+                "prices_coinbase"
             ]
         );
 

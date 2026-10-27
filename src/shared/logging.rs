@@ -68,7 +68,7 @@ pub fn setup() -> super::database::Result<(WorkerGuard, WorkerGuard)> {
 /// Counts committed feed events; market discoveries are logged individually.
 #[derive(Default, Debug, PartialEq)]
 pub(crate) struct WriteSummary {
-    counts: [u64; 7],
+    counts: [u64; 8],
     commits: u64,
     intervals: HashMap<U256, u64>,
 }
@@ -96,6 +96,7 @@ impl WriteSummary {
                 },
                 Event::Binance(_) => 5,
                 Event::Chainlink(_) => 6,
+                Event::Coinbase(_) => 7,
             };
             self.counts[index] += 1;
         }
@@ -110,14 +111,15 @@ impl WriteSummary {
             trades15,
             binance,
             chainlink,
+            coinbase,
         ] = self.counts;
         let total: u64 = self.counts[1..].iter().sum();
         tracing::info!(
-            "5M-Q({quotes5:03}) | 5M-T({trades5:03}) | 15M-Q({quotes15:03}) | 15M-T({trades15:03}) | BNAN-P({binance:03}) | CNLK-P({chainlink:03}) | TOTAL({total:03}) | COMMITS({:03}) | EVENTS/SEC({:05.1})",
+            "5M-Q({quotes5:03}) | 5M-T({trades5:03}) | 15M-Q({quotes15:03}) | 15M-T({trades15:03}) | BNAN-P({binance:03}) | CNLK-P({chainlink:03}) | CNBS-P({coinbase:03}) | TOTAL({total:03}) | COMMITS({:03}) | EVENTS/SEC({:05.1})",
             self.commits,
             total as f64 / elapsed.as_secs_f64().max(f64::EPSILON),
         );
-        self.counts = [0; 7];
+        self.counts = [0; 8];
         self.commits = 0;
     }
 
@@ -155,6 +157,11 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, u64, &'
             let asset = price.symbol.to_ascii_uppercase();
             let asset = asset.strip_suffix("USDT").unwrap_or(&asset);
             tracing::info!("BNAN | {asset:>4} | ${:<12}", price.value.to_string());
+            return;
+        }
+        Event::Coinbase(price) => {
+            let asset = price.symbol.split('-').next().unwrap().to_ascii_uppercase();
+            tracing::info!("CNBS | {asset:>4} | ${:<12}", price.value.to_string());
             return;
         }
         Event::Chainlink(price) => {
@@ -217,5 +224,7 @@ pub fn event(message: &Message, labels: &mut HashMap<U256, (String, u64, u64, &'
         start / 60 % 60
     );
     let interval = format!("{minutes}m");
-    tracing::info!("MKRT | {asset:>4} | {interval:>3} | {time} | {kind:<5} | {outcome:<4} | {details}");
+    tracing::info!(
+        "MKRT | {asset:>4} | {interval:>3} | {time} | {kind:<5} | {outcome:<4} | {details}"
+    );
 }
